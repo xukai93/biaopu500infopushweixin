@@ -43,7 +43,7 @@ PUSH_CHANNEL = "serverchan"
 
 # --- 方式一：Server酱（当前启用）---
 # 从 https://sct.ftqq.com 微信扫码获取；此 Key 等同密码，勿外泄
-SERVERCHAN_SENDKEY = "SCT470409TZnx2TrUMw0ipnELwmke4x6bA"
+SERVERCHAN_SENDKEY = os.environ.get("SERVERCHAN_SENDKEY", "")
 SERVERCHAN_API = "https://sctapi.ftqq.com"
 
 # --- 方式二：企业微信自建应用（纯官方，消息能到微信 App）---
