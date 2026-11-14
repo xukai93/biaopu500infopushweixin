@@ -1,10 +1,10 @@
 name: Python Scheduled Job
 
 on:
-  schedule:
-    # UTC 时间，北京时间 09:30 = UTC 01:30
-    # - cron: '0 23 * * *'
-    - cron: '*/5 * * * *'
+  # schedule:
+  #   # UTC 时间，北京时间 09:30 = UTC 01:30
+  #   # - cron: '0 23 * * *'
+  #   - cron: '*/5 * * * *'
   workflow_dispatch: {}   # 允许手动触发，方便测试
 
 jobs:
