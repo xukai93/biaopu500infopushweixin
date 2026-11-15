@@ -1,0 +1,76 @@
+# YouTube 频道更新监控
+# 部署位置：.github/workflows/youtube.yml
+#
+# 定时由 cron-job.org 在 07:07 / 每 2 小时 POST 到本 workflow 的
+# workflow_dispatch 接口触发；GitHub 自带 schedule 不可靠，已弃用。
+# 手动触发时可在 Actions 页面选择 mode，方便自检与看排版效果。
+
+name: YouTube 频道更新监控
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '运行模式（定时任务走默认值 normal，无需改动）'
+        required: false
+        default: 'normal'
+        type: choice
+        options:
+          - normal         # 正常检查，有新视频才推送
+          - init           # 重建基线，不推历史视频
+          - test-push      # 强制推一条真实数据，用于手机预览排版
+          - dry-run        # 只打印，不推送、不写状态
+          - resolve-only   # 连通性自检，打印全部频道的 RSS 地址
+
+permissions:
+  contents: read
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      TZ: Asia/Shanghai        # 让 datetime.now() 用北京时间，发布时间显示才正确
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 关键：跨次运行保留「已见过的 videoId」，否则每次都会把同一批视频
+      # 当成新更新重复推送。key 用 run_id 保证每次都存一份新的，
+      # restore-keys 前缀让下一次运行能拿到最近的那份。
+      # cache 若被清理，脚本还有 LOOKBACK_HOURS 时间窗口兜底，不会推老视频。
+      - name: Restore state
+        uses: actions/cache@v4
+        with:
+          path: youtube_state.json
+          key: yt-state-${{ github.run_id }}
+          restore-keys: |
+            yt-state-
+
+      - name: Run monitor
+        env:
+          SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
+          # 若改用企业微信渠道，按需加：
+          # WECOM_CORPID: ${{ secrets.WECOM_CORPID }}
+          # WECOM_CORPSECRET: ${{ secrets.WECOM_CORPSECRET }}
+          # WECOM_AGENTID: ${{ secrets.WECOM_AGENTID }}
+          # WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+        run: |
+          case "${{ inputs.mode }}" in
+            init)         python youtube_channel_monitor.py --init ;;
+            test-push)    python youtube_channel_monitor.py --test-push ;;
+            dry-run)      python youtube_channel_monitor.py --dry-run ;;
+            resolve-only) python youtube_channel_monitor.py --resolve-only ;;
+            *)            python youtube_channel_monitor.py ;;
+          esac
