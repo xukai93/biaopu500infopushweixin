@@ -78,8 +78,8 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 INVEST_ENABLED = True
 INVEST_NAME = "腾讯理财通 · 标普500"
 INVEST_PER_WORKDAY = 10.0
-INVEST_BASE = 410.0
-INVEST_BASE_DATE = "2026-11-13"
+INVEST_BASE = 425.33
+INVEST_BASE_DATE = "2026-11-16"
 
 # 企业微信官方 API 固定地址
 WECOM_TOKEN_URL = "https://qyapi.weixin.qq.com/cgi-bin/gettoken"
