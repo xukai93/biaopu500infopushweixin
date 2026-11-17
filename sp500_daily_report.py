@@ -20,6 +20,8 @@
   因此使用 serverchan 渠道时，消息内容与 SendKey 都会经过 sct.ftqq.com。
   想彻底不经第三方，把 PUSH_CHANNEL 改成 "wecom_app" 或 "wecom_webhook"，
   脚本便只会请求 qyapi.weixin.qq.com（腾讯官方域名）。
+  折线图由 quickchart.io 按 URL 生成（只含公开行情），微信客户端会向该域名取图；
+  脚本自身不请求它，不用图床、也不需要额外 Python 依赖。
   可用 grep 核对脚本里出现的所有域名：
     grep -oE 'https://[a-z0-9.]+' sp500_daily_report.py | sort -u
 
@@ -33,7 +35,10 @@
 
 import sys
 import os
+import json
+import math
 from datetime import date, datetime, timedelta
+from urllib.parse import quote
 
 import requests
 
@@ -66,8 +71,13 @@ TENCENT_URL = "https://qt.gtimg.cn/q=usINX"
 TENCENT_KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/usfqkline/get"
 TENCENT_KLINE_PARAMS = {"param": "usINX,day,,,10,qfq"}
 HIST_DAYS = 10
-CHART_HEIGHT = 8     # 折线图纵向行数
-CHART_STEP = 4       # 折线图每个交易日占用的横向字符数
+
+# 折线图：QuickChart 把 Chart.js 配置编码进 URL 直接出图，无需本机装绘图库或图床
+QUICKCHART_API = "https://quickchart.io/chart"
+CHART_IMG_W = 640
+CHART_IMG_H = 320
+CHART_HEIGHT = 8     # 纯文本渠道兜底用的字符图行数
+CHART_STEP = 4       # 字符图每个交易日占用的横向字符数
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC"
 YAHOO_PARAMS = {"range": "5d", "interval": "1d"}
 HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
@@ -182,8 +192,64 @@ def fetch_history(q: dict, days: int = HIST_DAYS):
         return None
 
 
+def _chart_image_url(hist) -> str:
+    """把近 N 日收盘价编码成 QuickChart 图片地址（Chart.js 折线图）。"""
+    values = [c for _, c in hist]
+    lo, hi = min(values), max(values)
+    pad = max((hi - lo) * 0.18, hi * 0.002)
+    rgb = "214,69,69" if values[-1] >= values[0] else "47,158,99"
+    config = {
+        "type": "line",
+        "data": {
+            "labels": [d[5:].replace("-", "/") for d, _ in hist],
+            "datasets": [{
+                "label": "Close",
+                "data": values,
+                "borderColor": f"rgb({rgb})",
+                "backgroundColor": f"rgba({rgb},0.10)",
+                "borderWidth": 2.5,
+                "fill": True,
+                "pointRadius": 3,
+                "pointHoverRadius": 5,
+                "pointBackgroundColor": "#fff",
+                "pointBorderColor": f"rgb({rgb})",
+                "pointBorderWidth": 2,
+                "tension": 0.3,
+            }],
+        },
+        "options": {
+            "responsive": False,
+            "plugins": {
+                "title": {
+                    "display": True,
+                    "text": f"S&P 500 · Last {len(values)} Sessions",
+                    "font": {"size": 18},
+                    "padding": {"top": 8, "bottom": 12},
+                },
+                "legend": {"display": False},
+            },
+            "scales": {
+                "x": {
+                    "grid": {"display": False},
+                    "ticks": {"maxRotation": 0, "autoSkip": True,
+                              "maxTicksLimit": 5, "color": "#666666"},
+                },
+                "y": {
+                    "min": math.floor(lo - pad),
+                    "max": math.ceil(hi + pad),
+                    "grid": {"color": "rgba(0,0,0,0.06)"},
+                    "ticks": {"maxTicksLimit": 6, "color": "#666666"},
+                },
+            },
+        },
+    }
+    encoded = quote(json.dumps(config, separators=(",", ":")), safe="")
+    return (f"{QUICKCHART_API}?c={encoded}&w={CHART_IMG_W}"
+            f"&h={CHART_IMG_H}&version=4&devicePixelRatio=2")
+
+
 def _draw_line_chart(hist) -> str:
-    """用字符画折线图展示近 N 日收盘价（无需图片托管，三种渠道都能显示）。"""
+    """字符画折线图：仅作纯文本渠道（无法显示图片）的兜底。"""
     values = [c for _, c in hist]
     lo, hi = min(values), max(values)
     if hi <= lo:
@@ -233,7 +299,10 @@ def chart_block(hist) -> dict | None:
         return None
     closes = [c for _, c in hist]
     pct = (closes[-1] / closes[0] - 1) * 100
+    url = _chart_image_url(hist)
     return {
+        "url": url,
+        "image": f"![近 {len(hist)} 日收盘价折线图]({url})",
         "chart": _draw_line_chart(hist),
         "pct": pct,
         "start": hist[0][0][5:].replace("-", "/"),
@@ -246,15 +315,6 @@ def chart_block(hist) -> dict | None:
         "arrow": "▲" if pct > 0 else ("▼" if pct < 0 else "—"),
     }
 
-
-def _chart_markdown(chart: str) -> str:
-    """标准 Markdown：代码块保住折线图的空格缩进。"""
-    return "```\n" + chart + "\n```"
-
-
-def _chart_wecom(chart: str) -> str:
-    """企业微信 Markdown 不支持代码块，逐行行内代码保住缩进。"""
-    return "\n".join(f"`{line}`" for line in chart.splitlines())
 
 
 def _workdays_after(start: date, end: date) -> int:
@@ -383,7 +443,7 @@ def render_markdown(q: dict, s: dict, bar: str, pos, t, inv) -> str:
             "",
             f"### 📈 近 {t['n']} 日价格折线图　{t['color']} {t['pct']:+.2f}%",
             "",
-            _chart_markdown(t["chart"]),
+            t["image"],
             "",
             f"> {t['start']} {t['first']:,.2f}　→　{t['end']} {t['last']:,.2f}",
             "",
@@ -427,9 +487,11 @@ def render_wecom_markdown(q: dict, s: dict, bar: str, pos, t, inv) -> str:
         lines += [f"日内位置 `{bar}` {pos:.0f}%", ""]
     if t:
         tc = t["wx_color"]
+        # 企业微信群机器人 markdown 不支持图片语法，用字符图 + 图片链接代替
         lines += [
             f"## 📈 近 {t['n']} 日价格折线图",
-            _chart_wecom(t["chart"]),
+            *[f"`{line}`" for line in t["chart"].splitlines()],
+            f"> [查看清晰折线图]({t['url']})",
             f"> <font color=\"{tc}\">{t['arrow']} {t['pct']:+.2f}%</font>　{t['start']} {t['first']:,.2f} → {t['end']} {t['last']:,.2f}",
             "",
         ]
