@@ -65,7 +65,9 @@ TENCENT_URL = "https://qt.gtimg.cn/q=usINX"
 # 日 K 线：返回近 10 个交易日，字段为 [日期, 开, 收, 高, 低, 量, ...]
 TENCENT_KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/usfqkline/get"
 TENCENT_KLINE_PARAMS = {"param": "usINX,day,,,10,qfq"}
-HIST_DAYS = 5
+HIST_DAYS = 10
+CHART_HEIGHT = 8     # 折线图纵向行数
+CHART_STEP = 4       # 折线图每个交易日占用的横向字符数
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC"
 YAHOO_PARAMS = {"range": "5d", "interval": "1d"}
 HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
@@ -153,9 +155,9 @@ def fetch_quote() -> dict:
 
 
 def fetch_history(q: dict, days: int = HIST_DAYS):
-    """获取近 N 个交易日收盘价，用于迷你走势。
+    """获取近 N 个交易日收盘价，用于价格折线图。
 
-    失败时返回 None，只省略走势图，不影响当日行情的正常推送。
+    失败时返回 None，只省略折线图，不影响当日行情的正常推送。
     """
     try:
         resp = requests.get(TENCENT_KLINE_URL, params=TENCENT_KLINE_PARAMS,
@@ -167,7 +169,7 @@ def fetch_history(q: dict, days: int = HIST_DAYS):
             return None
 
         # 与实时行情对齐：K 线最后一天同日则覆盖收盘价，否则追加，
-        # 避免早间 K 线尚未更新导致走势图与主数据不一致。
+        # 避免早间 K 线尚未更新导致折线图与主数据不一致。
         date = (q.get("time_str") or "").split(" ")[0]
         if date:
             if hist[-1][0] == date:
@@ -176,29 +178,63 @@ def fetch_history(q: dict, days: int = HIST_DAYS):
                 hist.append((date, q["close"]))
         return hist[-days:]
     except Exception as e:
-        print(f"[提示] 近{days}日走势获取失败({e})，本次消息省略走势图", file=sys.stderr)
+        print(f"[提示] 近{days}日价格折线图获取失败({e})，本次消息省略折线图", file=sys.stderr)
         return None
 
 
-SPARK_BLOCKS = "▁▂▃▄▅▆▇█"
-
-
-def _sparkline(values: list) -> str:
-    """把数值序列归一化成 Unicode 方块火花线。"""
+def _draw_line_chart(hist) -> str:
+    """用字符画折线图展示近 N 日收盘价（无需图片托管，三种渠道都能显示）。"""
+    values = [c for _, c in hist]
     lo, hi = min(values), max(values)
     if hi <= lo:
-        return "▄" * len(values)
-    return "".join(SPARK_BLOCKS[round((v - lo) / (hi - lo) * 7)] for v in values)
+        pad = abs(hi) * 0.005 or 1.0
+        lo, hi = lo - pad, hi + pad
+    else:
+        pad = (hi - lo) * 0.08
+        lo, hi = lo - pad, hi + pad
+
+    n = len(values)
+    width = (n - 1) * CHART_STEP + 1
+    grid = [[" "] * width for _ in range(CHART_HEIGHT)]
+
+    def row_of(v: float) -> int:
+        return round((hi - v) / (hi - lo) * (CHART_HEIGHT - 1))
+
+    points = [(row_of(v), i * CHART_STEP) for i, v in enumerate(values)]
+
+    # 先连线再标点，避免线段盖住数据点
+    for (r1, c1), (r2, c2) in zip(points, points[1:]):
+        for c in range(c1 + 1, c2 + 1):
+            r = round(r1 + (r2 - r1) * (c - c1) / (c2 - c1))
+            prev = round(r1 + (r2 - r1) * (c - 1 - c1) / (c2 - c1))
+            grid[r][c] = "─" if r == prev else ("╱" if r < prev else "╲")
+    for r, c in points:
+        grid[r][c] = "●"
+
+    label_w = len(f"{hi:,.0f}")
+    lines = []
+    for i, row in enumerate(grid):
+        v = lo + (hi - lo) * (CHART_HEIGHT - 1 - i) / (CHART_HEIGHT - 1)
+        lines.append(f"{v:>{label_w},.0f} ┤" + "".join(row).rstrip())
+
+    x_labels = [" "] * width
+    for i in (0, n // 2, n - 1):
+        text = hist[i][0][5:].replace("-", "/")
+        start = min(max(0, i * CHART_STEP - len(text) // 2), width - len(text))
+        x_labels[start:start + len(text)] = list(text)
+    lines.append(" " * (label_w + 1) + "└" + "─" * width)
+    lines.append(" " * (label_w + 1) + "".join(x_labels).rstrip())
+    return "\n".join(lines)
 
 
-def trend_block(hist) -> dict | None:
-    """把历史收盘价整理成模板可用的走势信息。"""
+def chart_block(hist) -> dict | None:
+    """把历史收盘价整理成模板可用的折线图信息。"""
     if not hist or len(hist) < 2:
         return None
     closes = [c for _, c in hist]
     pct = (closes[-1] / closes[0] - 1) * 100
     return {
-        "spark": _sparkline(closes),
+        "chart": _draw_line_chart(hist),
         "pct": pct,
         "start": hist[0][0][5:].replace("-", "/"),
         "end": hist[-1][0][5:].replace("-", "/"),
@@ -209,6 +245,16 @@ def trend_block(hist) -> dict | None:
         "wx_color": "warning" if pct > 0 else ("info" if pct < 0 else "comment"),
         "arrow": "▲" if pct > 0 else ("▼" if pct < 0 else "—"),
     }
+
+
+def _chart_markdown(chart: str) -> str:
+    """标准 Markdown：代码块保住折线图的空格缩进。"""
+    return "```\n" + chart + "\n```"
+
+
+def _chart_wecom(chart: str) -> str:
+    """企业微信 Markdown 不支持代码块，逐行行内代码保住缩进。"""
+    return "\n".join(f"`{line}`" for line in chart.splitlines())
 
 
 def _workdays_after(start: date, end: date) -> int:
@@ -335,7 +381,9 @@ def render_markdown(q: dict, s: dict, bar: str, pos, t, inv) -> str:
         lines += [
             "---",
             "",
-            f"**近 {t['n']} 日走势**　`{t['spark']}`　{t['color']} {t['pct']:+.2f}%",
+            f"### 📈 近 {t['n']} 日价格折线图　{t['color']} {t['pct']:+.2f}%",
+            "",
+            _chart_markdown(t["chart"]),
             "",
             f"> {t['start']} {t['first']:,.2f}　→　{t['end']} {t['last']:,.2f}",
             "",
@@ -380,7 +428,8 @@ def render_wecom_markdown(q: dict, s: dict, bar: str, pos, t, inv) -> str:
     if t:
         tc = t["wx_color"]
         lines += [
-            f"近 {t['n']} 日走势 `{t['spark']}`",
+            f"## 📈 近 {t['n']} 日价格折线图",
+            _chart_wecom(t["chart"]),
             f"> <font color=\"{tc}\">{t['arrow']} {t['pct']:+.2f}%</font>　{t['start']} {t['first']:,.2f} → {t['end']} {t['last']:,.2f}",
             "",
         ]
@@ -420,7 +469,8 @@ def render_plain(q: dict, s: dict, bar: str, pos, t, inv) -> str:
         lines += [
             "",
             sep,
-            f"　近 {t['n']} 日　{t['spark']} {t['pct']:+.2f}%",
+            f"　近 {t['n']} 日价格折线图　{t['arrow']} {t['pct']:+.2f}%",
+            t["chart"],
             f"　{t['start']} {t['first']:,.2f} → {t['end']} {t['last']:,.2f}",
         ]
     if inv:
@@ -441,7 +491,7 @@ def build_message(q: dict, hist=None) -> dict:
     """生成三种渠道各自适配的消息模板。"""
     s = _style(q)
     bar, pos = _range_bar(q)
-    t = trend_block(hist)
+    t = chart_block(hist)
     inv = invest_block(q)
     return {
         "title": f"{s['emoji']} 标普500 {q['pct']:+.2f}% · {_f(q['close'])}",
